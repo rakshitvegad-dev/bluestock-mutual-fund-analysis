@@ -1,30 +1,29 @@
-import os
+﻿"""
+Bluestock Mutual Fund Analytics - Data Ingestion
+
+Scans the project's data/raw directory, loads each CSV file, and reports
+basic dataset information including shape, data types, missing values,
+and duplicate rows.
+
+Run from the project root:
+
+    python scripts/data_ingestion.py
+"""
+
+from pathlib import Path
+import sys
 import pandas as pd
 
-# Folder containing all CSV files
-DATA_FOLDER = "mutual-fund-analysis/data/raw"
 
-# Check if folder exists
-if not os.path.exists(DATA_FOLDER):
-    print(f"Folder '{DATA_FOLDER}' not found.")
-    exit()
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_FOLDER = BASE_DIR / "data" / "raw"
 
-# Get all CSV files
-csv_files = [f for f in os.listdir(DATA_FOLDER) if f.endswith(".csv")]
 
-if len(csv_files) == 0:
-    print("No CSV files found in data/raw folder.")
-    exit()
-
-print("=" * 80)
-print(f"Found {len(csv_files)} CSV file(s)")
-print("=" * 80)
-
-for file in csv_files:
-    file_path = os.path.join(DATA_FOLDER, file)
+def inspect_csv(file_path: Path) -> None:
+    """Load and display basic information for one CSV file."""
 
     print("\n" + "=" * 80)
-    print(f"File: {file}")
+    print(f"File: {file_path.name}")
     print("=" * 80)
 
     try:
@@ -45,8 +44,41 @@ for file in csv_files:
         print("\nDuplicate Rows:")
         print(df.duplicated().sum())
 
-    except Exception as e:
-        print(f"Error reading {file}")
-        print(e)
+    except Exception as error:
+        print(f"\nERROR reading {file_path.name}:")
+        print(error)
+        raise
 
-print("\nData ingestion completed successfully.")
+
+def main() -> None:
+    """Run the data-ingestion inspection workflow."""
+
+    print("=" * 80)
+    print("BLUESTOCK MUTUAL FUND ANALYTICS")
+    print("DATA INGESTION")
+    print("=" * 80)
+
+    print(f"Data folder: {DATA_FOLDER}")
+
+    if not DATA_FOLDER.exists():
+        print(f"\nERROR: Data folder not found: {DATA_FOLDER}")
+        sys.exit(1)
+
+    csv_files = sorted(DATA_FOLDER.glob("*.csv"))
+
+    if not csv_files:
+        print("\nERROR: No CSV files found in data/raw.")
+        sys.exit(1)
+
+    print(f"\nFound {len(csv_files)} CSV file(s)")
+
+    for file_path in csv_files:
+        inspect_csv(file_path)
+
+    print("\n" + "=" * 80)
+    print("DATA INGESTION COMPLETED SUCCESSFULLY")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    main()
