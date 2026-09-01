@@ -16,9 +16,24 @@ import sys
 import time
 
 
-BASE_DIR = Path(__file__).resolve().parent
+# -------------------------------------------------------------------
+# PROJECT PATHS
+# -------------------------------------------------------------------
+
+# run_pipeline.py is inside:
+# D:\mutual-fund-analysis\scripts\
+#
+# Therefore:
+# parent       = D:\mutual-fund-analysis\scripts
+# parent.parent = D:\mutual-fund-analysis
+
+BASE_DIR = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = BASE_DIR / "scripts"
 
+
+# -------------------------------------------------------------------
+# PIPELINE STEPS
+# -------------------------------------------------------------------
 
 PIPELINE_STEPS = [
     ("Data ingestion", "data_ingestion.py"),
@@ -29,6 +44,10 @@ PIPELINE_STEPS = [
     ("Star schema validation", "validate_star_schema.py"),
 ]
 
+
+# -------------------------------------------------------------------
+# RUN INDIVIDUAL SCRIPT
+# -------------------------------------------------------------------
 
 def run_script(step_name: str, script_name: str) -> None:
     """Execute one pipeline script and stop if it fails."""
@@ -66,6 +85,10 @@ def run_script(step_name: str, script_name: str) -> None:
     )
 
 
+# -------------------------------------------------------------------
+# MAIN PIPELINE
+# -------------------------------------------------------------------
+
 def main() -> None:
     """Run the complete reproducible core analytics pipeline."""
 
@@ -73,13 +96,24 @@ def main() -> None:
     print("BLUESTOCK MUTUAL FUND ANALYTICS")
     print("MASTER PIPELINE")
     print("=" * 80)
+
     print(f"Project directory: {BASE_DIR}")
+    print(f"Scripts directory: {SCRIPTS_DIR}")
 
     pipeline_start = time.time()
 
     try:
+
+        # -----------------------------------------------------------
+        # Run all pipeline steps
+        # -----------------------------------------------------------
+
         for step_name, script_name in PIPELINE_STEPS:
             run_script(step_name, script_name)
+
+        # -----------------------------------------------------------
+        # Pipeline completed
+        # -----------------------------------------------------------
 
         total_time = time.time() - pipeline_start
 
@@ -91,6 +125,11 @@ def main() -> None:
         print("=" * 80)
 
     except Exception as error:
+
+        # -----------------------------------------------------------
+        # Pipeline failed
+        # -----------------------------------------------------------
+
         total_time = time.time() - pipeline_start
 
         print("\n" + "=" * 80)
@@ -102,6 +141,10 @@ def main() -> None:
 
         sys.exit(1)
 
+
+# -------------------------------------------------------------------
+# ENTRY POINT
+# -------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
