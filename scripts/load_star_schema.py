@@ -1,6 +1,33 @@
+﻿"""
+Bluestock Mutual Fund Analytics
+Star Schema Loader
+
+Purpose:
+    Build and populate the SQLite star schema.
+
+Dimensions:
+    dim_fund
+    dim_date
+
+Facts:
+    fact_nav
+    fact_transactions
+    fact_performance
+    fact_aum
+
+Core NAV dataset:
+    data/processed/nav_history_cleaned.csv
+
+Important:
+    The 40-fund historical nav_history dataset is the core
+    analytical dataset. Live *_Direct.csv files are NOT used
+    to replace nav_history.csv.
+"""
+
 import sqlite3
 import pandas as pd
 from pathlib import Path
+import sys
 
 
 # ============================================================
@@ -23,19 +50,30 @@ SCHEMA_PATH = BASE_DIR / "sql" / "schema.sql"
 # ============================================================
 
 def print_section(title):
-
-    print("\n" + "=" * 70)
+    print()
+    print("=" * 70)
     print(title)
     print("=" * 70)
 
 
 def check_file(path):
-
     if not path.exists():
-
         raise FileNotFoundError(
             f"Required file not found:\n{path}"
         )
+
+
+def safe_value(value):
+    """
+    Convert pandas values into SQLite-safe Python values.
+    """
+    if pd.isna(value):
+        return None
+
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d")
+
+    return value
 
 
 # ============================================================
@@ -46,7 +84,10 @@ def create_database():
 
     print_section("CREATING SQLITE DATABASE")
 
+    # --------------------------------------------------------
     # Remove old database
+    # --------------------------------------------------------
+
     if DB_PATH.exists():
 
         DB_PATH.unlink()
@@ -55,16 +96,22 @@ def create_database():
             f"Old database removed: {DB_PATH}"
         )
 
+    # --------------------------------------------------------
     # Create new database
+    # --------------------------------------------------------
+
     conn = sqlite3.connect(DB_PATH)
 
-    # Enable foreign keys
     conn.execute(
         "PRAGMA foreign_keys = ON"
     )
 
     print(
         f"New database created: {DB_PATH}"
+    )
+
+    print(
+        "Foreign keys: ENABLED"
     )
 
     return conn
@@ -89,29 +136,47 @@ def create_schema(conn):
     )
 
     print(
-        f"Schema file size: {len(schema_sql):,} characters"
+        f"Schema file size: "
+        f"{len(schema_sql):,} characters"
     )
 
     print(
-        "PRIMARY KEY found in schema :",
+        "PRIMARY KEY found in schema:",
         "PRIMARY KEY" in schema_sql.upper()
     )
 
     print(
-        "FOREIGN KEY found in schema :",
+        "FOREIGN KEY found in schema:",
         "FOREIGN KEY" in schema_sql.upper()
     )
 
     conn.executescript(schema_sql)
 
     print(
-        "\nSchema SQL executed successfully."
+        "Schema SQL executed successfully."
     )
 
 
 # ============================================================
-# VERIFY ACTUAL SQLITE SCHEMA
+# SQLITE SCHEMA HELPERS
 # ============================================================
+
+def get_tables(conn):
+
+    rows = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+        AND name NOT LIKE 'sqlite_%'
+        """
+    ).fetchall()
+
+    return {
+        row[0]
+        for row in rows
+    }
+
 
 def get_primary_keys(conn, table):
 
@@ -128,12 +193,14 @@ def get_primary_keys(conn, table):
 
 def get_foreign_keys(conn, table):
 
-    rows = conn.execute(
+    return conn.execute(
         f"PRAGMA foreign_key_list([{table}])"
     ).fetchall()
 
-    return rows
 
+# ============================================================
+# VERIFY SCHEMA
+# ============================================================
 
 def verify_schema(conn):
 
@@ -141,7 +208,7 @@ def verify_schema(conn):
         "VERIFYING ACTUAL SQLITE SCHEMA"
     )
 
-    tables = [
+    expected_tables = [
         "dim_fund",
         "dim_date",
         "fact_nav",
@@ -150,29 +217,25 @@ def verify_schema(conn):
         "fact_aum"
     ]
 
+    actual_tables = get_tables(conn)
+
     # --------------------------------------------------------
     # TABLE CHECK
     # --------------------------------------------------------
 
-    print("\nTABLE CHECK")
+    print()
+    print("TABLE CHECK")
     print("-" * 70)
 
-    actual_tables = {
-        row[0]
-        for row in conn.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type='table'
-            """
-        ).fetchall()
-    }
+    all_tables_exist = True
 
-    for table in tables:
+    for table in expected_tables:
+
+        exists = table in actual_tables
 
         status = (
             "PASS"
-            if table in actual_tables
+            if exists
             else "FAIL"
         )
 
@@ -180,14 +243,25 @@ def verify_schema(conn):
             f"{table:30} {status}"
         )
 
+        if not exists:
+            all_tables_exist = False
+
+    if not all_tables_exist:
+
+        raise ValueError(
+            "One or more required star-schema tables "
+            "are missing."
+        )
+
     # --------------------------------------------------------
     # PRIMARY KEY CHECK
     # --------------------------------------------------------
 
-    print("\nPRIMARY KEY CHECK")
+    print()
+    print("PRIMARY KEY CHECK")
     print("-" * 70)
 
-    for table in tables:
+    for table in expected_tables:
 
         primary_keys = get_primary_keys(
             conn,
@@ -201,17 +275,25 @@ def verify_schema(conn):
         )
 
         print(
-            f"{table:30} {status} -> {primary_keys}"
+            f"{table:30} "
+            f"{status} -> {primary_keys}"
         )
+
+        if not primary_keys:
+
+            raise ValueError(
+                f"Table {table} has no primary key."
+            )
 
     # --------------------------------------------------------
     # FOREIGN KEY CHECK
     # --------------------------------------------------------
 
-    print("\nFOREIGN KEY CHECK")
+    print()
+    print("FOREIGN KEY CHECK")
     print("-" * 70)
 
-    for table in tables:
+    for table in expected_tables:
 
         foreign_keys = get_foreign_keys(
             conn,
@@ -227,9 +309,6 @@ def verify_schema(conn):
 
             for fk in foreign_keys:
 
-                # SQLite PRAGMA format:
-                # id, seq, table, from, to, on_update, on_delete, match
-
                 print(
                     f"    {fk[3]} -> "
                     f"{fk[2]}.{fk[4]}"
@@ -238,12 +317,13 @@ def verify_schema(conn):
         else:
 
             print(
-                f"{table:30} PASS -> 0 foreign key(s)"
+                f"{table:30} PASS -> "
+                f"0 foreign key(s)"
             )
 
+    print()
     print(
-        "\nPRIMARY KEY and FOREIGN KEY "
-        "constraints verified."
+        "SQLite schema verification completed."
     )
 
 
@@ -253,7 +333,8 @@ def verify_schema(conn):
 
 def load_dim_fund(conn):
 
-    print("\nLoading dim_fund...")
+    print()
+    print("Loading dim_fund...")
 
     path = RAW_DIR / "fund_master.csv"
 
@@ -261,7 +342,11 @@ def load_dim_fund(conn):
 
     df = pd.read_csv(path)
 
-    columns = [
+    print(
+        f"Source rows: {len(df):,}"
+    )
+
+    required_columns = [
         "amfi_code",
         "fund_house",
         "scheme_name",
@@ -280,9 +365,9 @@ def load_dim_fund(conn):
     ]
 
     missing_columns = [
-        col
-        for col in columns
-        if col not in df.columns
+        column
+        for column in required_columns
+        if column not in df.columns
     ]
 
     if missing_columns:
@@ -292,43 +377,86 @@ def load_dim_fund(conn):
             + str(missing_columns)
         )
 
-    df = df[columns].copy()
+    df = df[
+        required_columns
+    ].copy()
 
-    # Convert date to SQLite-safe string
+    # --------------------------------------------------------
+    # AMFI code validation
+    # --------------------------------------------------------
+
+    df["amfi_code"] = pd.to_numeric(
+        df["amfi_code"],
+        errors="coerce"
+    )
+
+    if df["amfi_code"].isna().any():
+
+        raise ValueError(
+            "fund_master.csv contains invalid AMFI codes."
+        )
+
+    df["amfi_code"] = (
+        df["amfi_code"]
+        .astype(int)
+    )
+
+    duplicate_codes = (
+        df["amfi_code"]
+        .duplicated()
+        .sum()
+    )
+
+    if duplicate_codes > 0:
+
+        raise ValueError(
+            f"Duplicate AMFI codes found: "
+            f"{duplicate_codes}"
+        )
+
+    # --------------------------------------------------------
+    # Date conversion
+    # --------------------------------------------------------
+
     df["launch_date"] = pd.to_datetime(
         df["launch_date"],
         errors="coerce"
     ).dt.strftime("%Y-%m-%d")
 
+    # --------------------------------------------------------
+    # Insert
+    # --------------------------------------------------------
+
+    insert_sql = """
+        INSERT INTO dim_fund (
+            amfi_code,
+            fund_house,
+            scheme_name,
+            category,
+            sub_category,
+            plan,
+            launch_date,
+            benchmark,
+            expense_ratio_pct,
+            exit_load_pct,
+            min_sip_amount,
+            min_lumpsum_amount,
+            fund_manager,
+            risk_category,
+            sebi_category_code
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
     for _, row in df.iterrows():
 
         values = tuple(
-            None if pd.isna(value)
-            else value
+            safe_value(value)
             for value in row
         )
 
         conn.execute(
-            """
-            INSERT INTO dim_fund (
-                amfi_code,
-                fund_house,
-                scheme_name,
-                category,
-                sub_category,
-                plan,
-                launch_date,
-                benchmark,
-                expense_ratio_pct,
-                exit_load_pct,
-                min_sip_amount,
-                min_lumpsum_amount,
-                fund_manager,
-                risk_category,
-                sebi_category_code
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            insert_sql,
             values
         )
 
@@ -338,22 +466,23 @@ def load_dim_fund(conn):
 
 
 # ============================================================
-# LOAD DIM_DATE
+# COLLECT ALL DATES
 # ============================================================
 
-def load_dim_date(conn):
+def collect_all_dates():
 
-    print("\nLoading dim_date...")
+    print()
+    print("Collecting dates for dim_date...")
 
     all_dates = set()
 
     # --------------------------------------------------------
-    # 1. NAV DATES
+    # NAV dates
     # --------------------------------------------------------
 
     nav_path = (
-        PROCESSED_DIR /
-        "nav_history_cleaned.csv"
+        PROCESSED_DIR
+        / "nav_history_cleaned.csv"
     )
 
     check_file(nav_path)
@@ -363,7 +492,7 @@ def load_dim_date(conn):
     if "date" not in nav.columns:
 
         raise ValueError(
-            "date column not found in "
+            "date column missing from "
             "nav_history_cleaned.csv"
         )
 
@@ -372,23 +501,28 @@ def load_dim_date(conn):
         errors="coerce"
     ).dropna()
 
+    nav_date_strings = (
+        nav_dates
+        .dt.strftime("%Y-%m-%d")
+        .tolist()
+    )
+
     all_dates.update(
-        nav_dates.dt.strftime(
-            "%Y-%m-%d"
-        )
+        nav_date_strings
     )
 
     print(
-        f"NAV dates collected: {len(nav_dates):,}"
+        f"NAV dates collected: "
+        f"{len(nav_date_strings):,}"
     )
 
     # --------------------------------------------------------
-    # 2. TRANSACTION DATES
+    # Transaction dates
     # --------------------------------------------------------
 
     transaction_path = (
-        PROCESSED_DIR /
-        "investor_transactions_cleaned.csv"
+        PROCESSED_DIR
+        / "investor_transactions_cleaned.csv"
     )
 
     check_file(transaction_path)
@@ -400,8 +534,8 @@ def load_dim_date(conn):
     if "transaction_date" not in transactions.columns:
 
         raise ValueError(
-            "transaction_date column not found "
-            "in investor_transactions_cleaned.csv"
+            "transaction_date column missing from "
+            "investor_transactions_cleaned.csv"
         )
 
     transaction_dates = pd.to_datetime(
@@ -409,24 +543,28 @@ def load_dim_date(conn):
         errors="coerce"
     ).dropna()
 
+    transaction_date_strings = (
+        transaction_dates
+        .dt.strftime("%Y-%m-%d")
+        .tolist()
+    )
+
     all_dates.update(
-        transaction_dates.dt.strftime(
-            "%Y-%m-%d"
-        )
+        transaction_date_strings
     )
 
     print(
-        "Transaction dates collected: "
-        f"{len(transaction_dates):,}"
+        f"Transaction dates collected: "
+        f"{len(transaction_date_strings):,}"
     )
 
     # --------------------------------------------------------
-    # 3. AUM DATES
+    # AUM dates
     # --------------------------------------------------------
 
     aum_path = (
-        RAW_DIR /
-        "aum_by_fund_house.csv"
+        RAW_DIR
+        / "aum_by_fund_house.csv"
     )
 
     check_file(aum_path)
@@ -436,7 +574,7 @@ def load_dim_date(conn):
     if "date" not in aum.columns:
 
         raise ValueError(
-            "date column not found in "
+            "date column missing from "
             "aum_by_fund_house.csv"
         )
 
@@ -445,19 +583,23 @@ def load_dim_date(conn):
         errors="coerce"
     ).dropna()
 
+    aum_date_strings = (
+        aum_dates
+        .dt.strftime("%Y-%m-%d")
+        .tolist()
+    )
+
     all_dates.update(
-        aum_dates.dt.strftime(
-            "%Y-%m-%d"
-        )
+        aum_date_strings
     )
 
     print(
-        "AUM dates collected: "
-        f"{len(aum_dates):,}"
+        f"AUM dates collected: "
+        f"{len(aum_date_strings):,}"
     )
 
     # --------------------------------------------------------
-    # CHECK
+    # Final check
     # --------------------------------------------------------
 
     if not all_dates:
@@ -466,18 +608,31 @@ def load_dim_date(conn):
             "No valid dates found for dim_date."
         )
 
-    # --------------------------------------------------------
-    # CREATE DATE DATAFRAME
-    # --------------------------------------------------------
+    print(
+        f"Unique dates collected: "
+        f"{len(all_dates):,}"
+    )
+
+    return sorted(all_dates)
+
+
+# ============================================================
+# LOAD DIM_DATE
+# ============================================================
+
+def load_dim_date(conn):
+
+    print()
+    print("Loading dim_date...")
+
+    date_strings = collect_all_dates()
 
     dates = pd.DataFrame(
         {
-            "full_date": sorted(all_dates)
+            "full_date": pd.to_datetime(
+                date_strings
+            )
         }
-    )
-
-    dates["full_date"] = pd.to_datetime(
-        dates["full_date"]
     )
 
     dates["date_key"] = (
@@ -507,28 +662,28 @@ def load_dim_date(conn):
     )
 
     # --------------------------------------------------------
-    # INSERT
+    # Insert
     # --------------------------------------------------------
+
+    insert_sql = """
+        INSERT INTO dim_date (
+            date_key,
+            full_date,
+            year,
+            month,
+            month_name,
+            quarter
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+    """
 
     for _, row in dates.iterrows():
 
         conn.execute(
-            """
-            INSERT INTO dim_date (
-                date_key,
-                full_date,
-                year,
-                month,
-                month_name,
-                quarter
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
+            insert_sql,
             (
                 int(row["date_key"]),
 
-                # IMPORTANT:
-                # Convert Timestamp to string
                 row["full_date"].strftime(
                     "%Y-%m-%d"
                 ),
@@ -544,7 +699,8 @@ def load_dim_date(conn):
         )
 
     print(
-        f"dim_date loaded: {len(dates):,}"
+        f"dim_date loaded: "
+        f"{len(dates):,}"
     )
 
 
@@ -554,21 +710,98 @@ def load_dim_date(conn):
 
 def load_fact_nav(conn):
 
-    print("\nLoading fact_nav...")
+    print()
+    print("Loading fact_nav...")
 
     path = (
-        PROCESSED_DIR /
-        "nav_history_cleaned.csv"
+        PROCESSED_DIR
+        / "nav_history_cleaned.csv"
     )
 
     check_file(path)
 
     nav = pd.read_csv(path)
 
+    required_columns = [
+        "amfi_code",
+        "date",
+        "nav"
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in nav.columns
+    ]
+
+    if missing_columns:
+
+        raise ValueError(
+            "Missing columns in "
+            "nav_history_cleaned.csv:\n"
+            + str(missing_columns)
+        )
+
+    print(
+        f"Source NAV rows: "
+        f"{len(nav):,}"
+    )
+
+    # --------------------------------------------------------
+    # Convert types
+    # --------------------------------------------------------
+
+    nav["amfi_code"] = pd.to_numeric(
+        nav["amfi_code"],
+        errors="coerce"
+    )
+
     nav["date"] = pd.to_datetime(
         nav["date"],
         errors="coerce"
     )
+
+    nav["nav"] = pd.to_numeric(
+        nav["nav"],
+        errors="coerce"
+    )
+
+    # --------------------------------------------------------
+    # Validate
+    # --------------------------------------------------------
+
+    if nav["amfi_code"].isna().any():
+
+        raise ValueError(
+            "fact_nav contains invalid AMFI codes."
+        )
+
+    if nav["date"].isna().any():
+
+        raise ValueError(
+            "fact_nav contains invalid dates."
+        )
+
+    if nav["nav"].isna().any():
+
+        raise ValueError(
+            "fact_nav contains NULL NAV values."
+        )
+
+    if (nav["nav"] <= 0).any():
+
+        raise ValueError(
+            "fact_nav contains NAV values <= 0."
+        )
+
+    nav["amfi_code"] = (
+        nav["amfi_code"]
+        .astype(int)
+    )
+
+    # --------------------------------------------------------
+    # Create date key
+    # --------------------------------------------------------
 
     nav["date_key"] = (
         nav["date"]
@@ -576,38 +809,110 @@ def load_fact_nav(conn):
         .astype(int)
     )
 
-    # Check dates exist in dim_date
-    missing_dates = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM fact_nav
-        """
-    ).fetchone()[0]
+    # --------------------------------------------------------
+    # Validate duplicate fund/date
+    # --------------------------------------------------------
+
+    duplicates = nav.duplicated(
+        subset=[
+            "amfi_code",
+            "date_key"
+        ]
+    ).sum()
+
+    if duplicates > 0:
+
+        raise ValueError(
+            "Duplicate AMFI/date records found "
+            f"in fact_nav: {duplicates}"
+        )
 
     # --------------------------------------------------------
-    # INSERT
+    # Validate fund references
     # --------------------------------------------------------
+
+    dim_funds = {
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT amfi_code
+            FROM dim_fund
+            """
+        ).fetchall()
+    }
+
+    missing_funds = sorted(
+        set(nav["amfi_code"])
+        - dim_funds
+    )
+
+    if missing_funds:
+
+        raise ValueError(
+            "NAV contains AMFI codes not found "
+            f"in dim_fund:\n{missing_funds}"
+        )
+
+    # --------------------------------------------------------
+    # Validate date references
+    # --------------------------------------------------------
+
+    dim_dates = {
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT date_key
+            FROM dim_date
+            """
+        ).fetchall()
+    }
+
+    missing_dates = sorted(
+        set(nav["date_key"])
+        - dim_dates
+    )
+
+    if missing_dates:
+
+        raise ValueError(
+            "NAV contains date_key values not found "
+            f"in dim_date:\n{missing_dates[:20]}"
+        )
+
+    # --------------------------------------------------------
+    # Insert
+    # --------------------------------------------------------
+
+    insert_sql = """
+        INSERT INTO fact_nav (
+            amfi_code,
+            date_key,
+            nav
+        )
+        VALUES (?, ?, ?)
+    """
 
     for _, row in nav.iterrows():
 
         conn.execute(
-            """
-            INSERT INTO fact_nav (
-                amfi_code,
-                date_key,
-                nav
-            )
-            VALUES (?, ?, ?)
-            """,
+            insert_sql,
             (
                 int(row["amfi_code"]),
+
                 int(row["date_key"]),
+
                 float(row["nav"])
             )
         )
 
     print(
-        f"fact_nav loaded: {len(nav):,}"
+        f"fact_nav loaded: "
+        f"{len(nav):,}"
+    )
+
+    print(
+        f"Unique funds: "
+        f"{nav['amfi_code'].nunique():,}"
     )
 
 
@@ -617,56 +922,178 @@ def load_fact_nav(conn):
 
 def load_fact_transactions(conn):
 
-    print("\nLoading fact_transactions...")
+    print()
+    print("Loading fact_transactions...")
 
     path = (
-        PROCESSED_DIR /
-        "investor_transactions_cleaned.csv"
+        PROCESSED_DIR
+        / "investor_transactions_cleaned.csv"
     )
 
     check_file(path)
 
     df = pd.read_csv(path)
 
-    if "transaction_date" in df.columns:
+    required_columns = [
+        "investor_id",
+        "transaction_date",
+        "amfi_code",
+        "transaction_type",
+        "amount_inr",
+        "state",
+        "city",
+        "city_tier",
+        "age_group",
+        "gender",
+        "annual_income_lakh",
+        "payment_mode",
+        "kyc_status"
+    ]
 
-        df["transaction_date"] = pd.to_datetime(
-            df["transaction_date"],
-            errors="coerce"
-        ).dt.strftime("%Y-%m-%d")
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in df.columns
+    ]
+
+    if missing_columns:
+
+        raise ValueError(
+            "Missing columns in "
+            "investor_transactions_cleaned.csv:\n"
+            + str(missing_columns)
+        )
+
+    df = df[
+        required_columns
+    ].copy()
+
+    print(
+        f"Source transaction rows: "
+        f"{len(df):,}"
+    )
+
+    # --------------------------------------------------------
+    # Convert dates
+    # --------------------------------------------------------
+
+    df["transaction_date"] = pd.to_datetime(
+        df["transaction_date"],
+        errors="coerce"
+    )
+
+    if df["transaction_date"].isna().any():
+
+        raise ValueError(
+            "Invalid transaction dates found."
+        )
+
+    df["transaction_date"] = (
+        df["transaction_date"]
+        .dt.strftime("%Y-%m-%d")
+    )
+
+    # --------------------------------------------------------
+    # Convert numeric fields
+    # --------------------------------------------------------
+
+    df["amount_inr"] = pd.to_numeric(
+        df["amount_inr"],
+        errors="coerce"
+    )
+
+    if df["amount_inr"].isna().any():
+
+        raise ValueError(
+            "NULL/invalid amount_inr values found."
+        )
+
+    if (df["amount_inr"] <= 0).any():
+
+        raise ValueError(
+            "Transaction amount must be > 0."
+        )
+
+    df["amfi_code"] = pd.to_numeric(
+        df["amfi_code"],
+        errors="coerce"
+    )
+
+    if df["amfi_code"].isna().any():
+
+        raise ValueError(
+            "Invalid AMFI codes found in transactions."
+        )
+
+    df["amfi_code"] = (
+        df["amfi_code"]
+        .astype(int)
+    )
+
+    # --------------------------------------------------------
+    # Validate fund references
+    # --------------------------------------------------------
+
+    dim_funds = {
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT amfi_code
+            FROM dim_fund
+            """
+        ).fetchall()
+    }
+
+    missing_funds = sorted(
+        set(df["amfi_code"])
+        - dim_funds
+    )
+
+    if missing_funds:
+
+        raise ValueError(
+            "Transactions contain AMFI codes not found "
+            f"in dim_fund:\n{missing_funds}"
+        )
+
+    # --------------------------------------------------------
+    # Insert
+    # --------------------------------------------------------
+
+    insert_sql = """
+        INSERT INTO fact_transactions (
+            investor_id,
+            transaction_date,
+            amfi_code,
+            transaction_type,
+            amount_inr,
+            state,
+            city,
+            city_tier,
+            age_group,
+            gender,
+            annual_income_lakh,
+            payment_mode,
+            kyc_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
 
     for _, row in df.iterrows():
 
         values = tuple(
-            None if pd.isna(value)
-            else value
+            safe_value(value)
             for value in row
         )
 
         conn.execute(
-            """
-            INSERT INTO fact_transactions (
-                investor_id,
-                transaction_date,
-                amfi_code,
-                transaction_type,
-                amount_inr,
-                state,
-                city,
-                city_tier,
-                age_group,
-                gender,
-                annual_income_lakh,
-                payment_mode,
-                kyc_status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            insert_sql,
             values
         )
 
     print(
-        f"fact_transactions loaded: {len(df):,}"
+        f"fact_transactions loaded: "
+        f"{len(df):,}"
     )
 
 
@@ -676,11 +1103,12 @@ def load_fact_transactions(conn):
 
 def load_fact_performance(conn):
 
-    print("\nLoading fact_performance...")
+    print()
+    print("Loading fact_performance...")
 
     path = (
-        PROCESSED_DIR /
-        "cleaned_scheme_performance.csv"
+        PROCESSED_DIR
+        / "cleaned_scheme_performance.csv"
     )
 
     check_file(path)
@@ -706,9 +1134,9 @@ def load_fact_performance(conn):
     ]
 
     missing_columns = [
-        col
-        for col in columns
-        if col not in df.columns
+        column
+        for column in columns
+        if column not in df.columns
     ]
 
     if missing_columns:
@@ -719,42 +1147,98 @@ def load_fact_performance(conn):
             + str(missing_columns)
         )
 
-    df = df[columns].copy()
+    df = df[
+        columns
+    ].copy()
+
+    print(
+        f"Source performance rows: "
+        f"{len(df):,}"
+    )
+
+    # --------------------------------------------------------
+    # AMFI validation
+    # --------------------------------------------------------
+
+    df["amfi_code"] = pd.to_numeric(
+        df["amfi_code"],
+        errors="coerce"
+    )
+
+    if df["amfi_code"].isna().any():
+
+        raise ValueError(
+            "Invalid AMFI codes in performance data."
+        )
+
+    df["amfi_code"] = (
+        df["amfi_code"]
+        .astype(int)
+    )
+
+    dim_funds = {
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT amfi_code
+            FROM dim_fund
+            """
+        ).fetchall()
+    }
+
+    missing_funds = sorted(
+        set(df["amfi_code"])
+        - dim_funds
+    )
+
+    if missing_funds:
+
+        raise ValueError(
+            "Performance data contains AMFI codes "
+            "not found in dim_fund:\n"
+            + str(missing_funds)
+        )
+
+    # --------------------------------------------------------
+    # Insert
+    # --------------------------------------------------------
+
+    insert_sql = """
+        INSERT INTO fact_performance (
+            amfi_code,
+            return_1yr_pct,
+            return_3yr_pct,
+            return_5yr_pct,
+            benchmark_3yr_pct,
+            alpha,
+            beta,
+            sharpe_ratio,
+            sortino_ratio,
+            std_dev_ann_pct,
+            max_drawdown_pct,
+            aum_crore,
+            expense_ratio_pct,
+            morningstar_rating,
+            risk_grade
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
 
     for _, row in df.iterrows():
 
         values = tuple(
-            None if pd.isna(value)
-            else value
+            safe_value(value)
             for value in row
         )
 
         conn.execute(
-            """
-            INSERT INTO fact_performance (
-                amfi_code,
-                return_1yr_pct,
-                return_3yr_pct,
-                return_5yr_pct,
-                benchmark_3yr_pct,
-                alpha,
-                beta,
-                sharpe_ratio,
-                sortino_ratio,
-                std_dev_ann_pct,
-                max_drawdown_pct,
-                aum_crore,
-                expense_ratio_pct,
-                morningstar_rating,
-                risk_grade
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            insert_sql,
             values
         )
 
     print(
-        f"fact_performance loaded: {len(df):,}"
+        f"fact_performance loaded: "
+        f"{len(df):,}"
     )
 
 
@@ -764,11 +1248,12 @@ def load_fact_performance(conn):
 
 def load_fact_aum(conn):
 
-    print("\nLoading fact_aum...")
+    print()
+    print("Loading fact_aum...")
 
     path = (
-        RAW_DIR /
-        "aum_by_fund_house.csv"
+        RAW_DIR
+        / "aum_by_fund_house.csv"
     )
 
     check_file(path)
@@ -784,9 +1269,9 @@ def load_fact_aum(conn):
     ]
 
     missing_columns = [
-        col
-        for col in required_columns
-        if col not in df.columns
+        column
+        for column in required_columns
+        if column not in df.columns
     ]
 
     if missing_columns:
@@ -797,8 +1282,17 @@ def load_fact_aum(conn):
             + str(missing_columns)
         )
 
+    df = df[
+        required_columns
+    ].copy()
+
+    print(
+        f"Source AUM rows: "
+        f"{len(df):,}"
+    )
+
     # --------------------------------------------------------
-    # Convert date
+    # Date conversion
     # --------------------------------------------------------
 
     df["date"] = pd.to_datetime(
@@ -806,12 +1300,12 @@ def load_fact_aum(conn):
         errors="coerce"
     )
 
-    # Remove invalid dates
-    df = df.dropna(
-        subset=["date"]
-    )
+    if df["date"].isna().any():
 
-    # Generate date_key
+        raise ValueError(
+            "Invalid AUM dates found."
+        )
+
     df["date_key"] = (
         df["date"]
         .dt.strftime("%Y%m%d")
@@ -819,9 +1313,26 @@ def load_fact_aum(conn):
     )
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    # Check that every AUM date exists
-    # in dim_date
+    # Numeric conversion
+    # --------------------------------------------------------
+
+    df["aum_lakh_crore"] = pd.to_numeric(
+        df["aum_lakh_crore"],
+        errors="coerce"
+    )
+
+    df["aum_crore"] = pd.to_numeric(
+        df["aum_crore"],
+        errors="coerce"
+    )
+
+    df["num_schemes"] = pd.to_numeric(
+        df["num_schemes"],
+        errors="coerce"
+    )
+
+    # --------------------------------------------------------
+    # Check date references
     # --------------------------------------------------------
 
     dim_dates = {
@@ -835,43 +1346,37 @@ def load_fact_aum(conn):
     }
 
     missing_date_keys = sorted(
-        set(df["date_key"]) -
-        dim_dates
+        set(df["date_key"])
+        - dim_dates
     )
 
     if missing_date_keys:
 
-        print(
-            "\nWARNING: Missing AUM date keys "
-            "in dim_date:"
-        )
-
-        print(
-            missing_date_keys[:20]
-        )
-
         raise ValueError(
-            "AUM contains date_key values "
-            "that do not exist in dim_date."
+            "AUM contains date_key values not found "
+            "in dim_date:\n"
+            + str(missing_date_keys[:20])
         )
 
     # --------------------------------------------------------
     # Insert
     # --------------------------------------------------------
 
+    insert_sql = """
+        INSERT INTO fact_aum (
+            date_key,
+            fund_house,
+            aum_lakh_crore,
+            aum_crore,
+            num_schemes
+        )
+        VALUES (?, ?, ?, ?, ?)
+    """
+
     for _, row in df.iterrows():
 
         conn.execute(
-            """
-            INSERT INTO fact_aum (
-                date_key,
-                fund_house,
-                aum_lakh_crore,
-                aum_crore,
-                num_schemes
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
+            insert_sql,
             (
                 int(row["date_key"]),
 
@@ -892,7 +1397,8 @@ def load_fact_aum(conn):
         )
 
     print(
-        f"fact_aum loaded: {len(df):,}"
+        f"fact_aum loaded: "
+        f"{len(df):,}"
     )
 
 
@@ -1034,7 +1540,7 @@ def validate_data(conn):
     )
 
     # --------------------------------------------------------
-    # AMFI codes
+    # FUND COUNT
     # --------------------------------------------------------
 
     fund_count = conn.execute(
@@ -1052,23 +1558,25 @@ def validate_data(conn):
     ).fetchone()[0]
 
     print(
-        f"Unique funds in dim_fund : {fund_count}"
+        f"Unique funds in dim_fund : "
+        f"{fund_count}"
     )
 
     print(
-        f"Unique funds in fact_nav : {nav_fund_count}"
+        f"Unique funds in fact_nav : "
+        f"{nav_fund_count}"
     )
 
     if fund_count == nav_fund_count:
 
         print(
-            "AMFI code validation: PASS"
+            "AMFI fund count validation: PASS"
         )
 
     else:
 
         print(
-            "AMFI code validation: FAIL"
+            "AMFI fund count validation: FAIL"
         )
 
     # --------------------------------------------------------
@@ -1079,36 +1587,38 @@ def validate_data(conn):
         """
         SELECT COUNT(*)
         FROM fact_nav
-        WHERE nav <= 0
+        WHERE nav IS NULL
+           OR nav <= 0
         """
     ).fetchone()[0]
 
     print(
-        f"\nNAV > 0 validation: "
+        "\nNAV > 0 validation: "
         f"{'PASS' if invalid_nav == 0 else 'FAIL'} "
         f"Invalid rows={invalid_nav}"
     )
 
     # --------------------------------------------------------
-    # Transactions
+    # TRANSACTIONS
     # --------------------------------------------------------
 
     invalid_transactions = conn.execute(
         """
         SELECT COUNT(*)
         FROM fact_transactions
-        WHERE amount_inr <= 0
+        WHERE amount_inr IS NULL
+           OR amount_inr <= 0
         """
     ).fetchone()[0]
 
     print(
-        f"Transaction amount > 0: "
+        "Transaction amount > 0: "
         f"{'PASS' if invalid_transactions == 0 else 'FAIL'} "
         f"Invalid rows={invalid_transactions}"
     )
 
     # --------------------------------------------------------
-    # Performance
+    # PERFORMANCE
     # --------------------------------------------------------
 
     performance_count = conn.execute(
@@ -1120,8 +1630,83 @@ def validate_data(conn):
 
     print(
         f"Performance records: "
-        f"{performance_count}"
+        f"{performance_count:,}"
     )
+
+    # --------------------------------------------------------
+    # AUM
+    # --------------------------------------------------------
+
+    aum_count = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM fact_aum
+        """
+    ).fetchone()[0]
+
+    print(
+        f"AUM records: "
+        f"{aum_count:,}"
+    )
+
+    # --------------------------------------------------------
+    # NULL CHECKS
+    # --------------------------------------------------------
+
+    null_nav = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM fact_nav
+        WHERE nav IS NULL
+        """
+    ).fetchone()[0]
+
+    null_transaction_dates = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM fact_transactions
+        WHERE transaction_date IS NULL
+        """
+    ).fetchone()[0]
+
+    print(
+        "\nNULL NAV values: "
+        f"{null_nav}"
+    )
+
+    print(
+        "NULL transaction dates: "
+        f"{null_transaction_dates}"
+    )
+
+
+# ============================================================
+# VERIFY FOREIGN KEY ENFORCEMENT
+# ============================================================
+
+def verify_foreign_key_enforcement(conn):
+
+    print_section(
+        "FOREIGN KEY ENFORCEMENT"
+    )
+
+    result = conn.execute(
+        "PRAGMA foreign_keys"
+    ).fetchone()[0]
+
+    if result == 1:
+
+        print(
+            "Foreign key enforcement: PASS"
+        )
+
+        return True
+
+    print(
+        "Foreign key enforcement: FAIL"
+    )
+
+    return False
 
 
 # ============================================================
@@ -1130,33 +1715,49 @@ def validate_data(conn):
 
 def main():
 
-    conn = create_database()
+    conn = None
 
     try:
 
         # ----------------------------------------------------
-        # Create schema
+        # CREATE DATABASE
+        # ----------------------------------------------------
+
+        conn = create_database()
+
+        # ----------------------------------------------------
+        # CREATE SCHEMA
         # ----------------------------------------------------
 
         create_schema(conn)
 
         # ----------------------------------------------------
-        # Verify schema BEFORE loading
+        # VERIFY SCHEMA
         # ----------------------------------------------------
 
         verify_schema(conn)
 
+        verify_foreign_key_enforcement(conn)
+
         # ----------------------------------------------------
-        # Load dimensions
+        # LOAD DIMENSIONS
         # ----------------------------------------------------
+
+        print_section(
+            "LOADING DIMENSION TABLES"
+        )
 
         load_dim_fund(conn)
 
         load_dim_date(conn)
 
         # ----------------------------------------------------
-        # Load facts
+        # LOAD FACT TABLES
         # ----------------------------------------------------
+
+        print_section(
+            "LOADING FACT TABLES"
+        )
 
         load_fact_nav(conn)
 
@@ -1167,7 +1768,7 @@ def main():
         load_fact_aum(conn)
 
         # ----------------------------------------------------
-        # Commit
+        # COMMIT
         # ----------------------------------------------------
 
         conn.commit()
@@ -1181,13 +1782,13 @@ def main():
         )
 
         # ----------------------------------------------------
-        # Verify counts
+        # ROW COUNTS
         # ----------------------------------------------------
 
         verify_counts(conn)
 
         # ----------------------------------------------------
-        # Referential integrity
+        # REFERENTIAL INTEGRITY
         # ----------------------------------------------------
 
         integrity_pass = (
@@ -1195,13 +1796,13 @@ def main():
         )
 
         # ----------------------------------------------------
-        # Data validation
+        # DATA VALIDATION
         # ----------------------------------------------------
 
         validate_data(conn)
 
         # ----------------------------------------------------
-        # Final result
+        # FINAL RESULT
         # ----------------------------------------------------
 
         print_section(
@@ -1211,50 +1812,73 @@ def main():
         if integrity_pass:
 
             print(
-                "✅ STAR SCHEMA LOADING COMPLETED "
+                "STAR SCHEMA LOADING COMPLETED "
                 "SUCCESSFULLY"
             )
 
             print(
-                "✅ PRIMARY KEYS verified"
+                "PRIMARY KEYS verified"
             )
 
             print(
-                "✅ FOREIGN KEYS verified"
+                "FOREIGN KEYS verified"
             )
 
             print(
-                "✅ REFERENTIAL INTEGRITY verified"
+                "REFERENTIAL INTEGRITY verified"
             )
+
+            print(
+                "DATA VALIDATION completed"
+            )
+
+            print()
+            print(
+                f"SQLite database:"
+            )
+
+            print(
+                f"{DB_PATH}"
+            )
+
+            return 0
 
         else:
 
             print(
-                "⚠️ STAR SCHEMA LOADED "
-                "BUT REFERENTIAL INTEGRITY NEEDS ATTENTION"
+                "STAR SCHEMA LOADED BUT "
+                "REFERENTIAL INTEGRITY NEEDS ATTENTION"
             )
 
-    except Exception as e:
+            return 1
 
-        conn.rollback()
+    except Exception as error:
 
-        print_section(
-            "STAR SCHEMA LOADING FAILED"
-        )
+        if conn is not None:
 
+            conn.rollback()
+
+        print()
+        print("=" * 70)
+        print("STAR SCHEMA LOADING FAILED")
+        print("=" * 70)
         print(
-            f"Error: {e}"
+            f"Error: {error}"
         )
+        print("=" * 70)
 
-        raise
+        return 1
 
     finally:
 
-        conn.close()
+        if conn is not None:
 
-        print(
-            "\nDatabase connection closed."
-        )
+            conn.close()
+
+            print()
+            print(
+                "Database connection closed."
+            )
 
 
 # ============================================================
@@ -1263,4 +1887,6 @@ def main():
 
 if __name__ == "__main__":
 
-    main()
+    sys.exit(
+        main()
+    )

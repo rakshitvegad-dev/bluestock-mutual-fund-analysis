@@ -1,0 +1,4 @@
+transaction_type,transaction_count,average_transaction_amount,total_transaction_amount
+Lumpsum,8095,254456.02,2059821448.0
+Redemption,4967,250558.79,1244525491.0
+SIP,19716,11018.13,217233491.0

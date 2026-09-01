@@ -661,7 +661,7 @@ def main():
 
     if all(results):
 
-        print("🟢 ALL STAR SCHEMA VALIDATIONS PASSED")
+        print("ALL STAR SCHEMA VALIDATIONS PASSED")
 
     else:
 
